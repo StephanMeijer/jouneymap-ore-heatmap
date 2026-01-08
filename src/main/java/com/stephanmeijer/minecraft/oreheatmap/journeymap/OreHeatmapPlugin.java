@@ -24,7 +24,8 @@ public class OreHeatmapPlugin implements IClientPlugin {
     private IClientAPI jmAPI;
     private OreHeatmapOverlayManager overlayManager;
 
-    private static OreHeatmapPlugin instance;
+    // Volatile ensures visibility across threads (JourneyMap may call from different threads)
+    private static volatile OreHeatmapPlugin instance;
 
     public OreHeatmapPlugin() {
         instance = this;
@@ -46,6 +47,11 @@ public class OreHeatmapPlugin implements IClientPlugin {
 
     @Override
     public void initialize(IClientAPI jmClientApi) {
+        if (jmClientApi == null) {
+            OreHeatmapMod.LOGGER.error("JourneyMap API is null - cannot initialize plugin");
+            return;
+        }
+
         try {
             OreHeatmapMod.LOGGER.info("OreHeatmapPlugin.initialize() called");
 

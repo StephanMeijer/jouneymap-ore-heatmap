@@ -6,10 +6,13 @@ import java.io.Writer;
 import java.lang.reflect.Type;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
@@ -35,6 +38,7 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.storage.LevelResource;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.client.event.ClientPlayerNetworkEvent;
 import net.neoforged.neoforge.event.level.ChunkEvent;
@@ -57,13 +61,16 @@ public class OreHeatmapOverlayManager {
     private final Set<ResourceLocation> trackedBlocks = new HashSet<>();
     private final Set<TagKey<Block>> trackedTags = new HashSet<>();
 
-    // Dynamic color scaling
-    private int maxOreCount = 1;
+    // Dynamic color scaling - thread-safe for access from chunk load and player tick events
+    private final AtomicInteger maxOreCount = new AtomicInteger(1);
 
     // Heatmap colors
     private static final int COLOR_LOW = 0xFFFFE0;   // Light yellow/white
     private static final int COLOR_MID = 0xFF8C00;   // Dark orange
     private static final int COLOR_HIGH = 0x8B0000;  // Dark red
+
+    // Y-coordinate for overlay polygon plane
+    private static final int POLYGON_Y_LEVEL = 64;
 
     private int tickCounter;
     private int saveCounter;
@@ -72,10 +79,27 @@ public class OreHeatmapOverlayManager {
     private ResourceKey<Level> currentDimension;
     private String currentWorldId;
     private boolean wasEnabled;  // Track previous enabled state
+    private boolean cacheLoadFailed;  // Track if cache failed to load
+    private Path cacheDirectory;  // Cached directory path
 
     public OreHeatmapOverlayManager(IClientAPI jmAPI) {
         this.jmAPI = jmAPI;
         loadTrackedOres();
+        initializeCacheDirectory();
+    }
+
+    /**
+     * Initialize the cache directory once during construction.
+     */
+    private void initializeCacheDirectory() {
+        try {
+            cacheDirectory = Minecraft.getInstance().gameDirectory.toPath()
+                    .resolve("journeymap").resolve("ore_heatmap_cache");
+            Files.createDirectories(cacheDirectory);
+        } catch (IOException e) {
+            OreHeatmapMod.LOGGER.error("Failed to create cache directory", e);
+            cacheDirectory = null;
+        }
     }
 
     private void loadTrackedOres() {
@@ -103,41 +127,57 @@ public class OreHeatmapOverlayManager {
 
     /**
      * Get a unique identifier for the current world/server.
+     * Uses the world's save folder name (not display name) for uniqueness.
+     *
+     * @return the world ID, or null if it cannot be determined
      */
     private String getWorldId() {
         Minecraft mc = Minecraft.getInstance();
         if (mc.isLocalServer() && mc.getSingleplayerServer() != null) {
-            // Single player - use world folder name
-            return "local_" + mc.getSingleplayerServer().getWorldData().getLevelName()
-                    .replaceAll("[^a-zA-Z0-9]", "_");
+            // Single player - use world save folder name (not display name!)
+            // getWorldPath gives us the full path, we normalize it to resolve "." components
+            // then extract just the folder name
+            Path worldPath = mc.getSingleplayerServer().getWorldPath(LevelResource.ROOT);
+            Path normalizedPath = worldPath.toAbsolutePath().normalize();
+            Path fileName = normalizedPath.getFileName();
+            if (fileName == null) {
+                OreHeatmapMod.LOGGER.warn("Could not get world folder name from path: {}", worldPath);
+                return null;
+            }
+            String folderName = fileName.toString();
+            return "local_" + folderName.replaceAll("[^a-zA-Z0-9_()-]", "_");
         } else if (mc.getCurrentServer() != null) {
             // Multiplayer - use server address
             return "server_" + mc.getCurrentServer().ip
                     .replaceAll("[^a-zA-Z0-9]", "_");
         }
-        return "unknown";
+        return null;
     }
 
+    /**
+     * Get the cache file path for the current world.
+     *
+     * @return the cache file path, or null if cache directory or world ID is unavailable
+     */
     private Path getCacheFilePath() {
-        Path cacheDir = Minecraft.getInstance().gameDirectory.toPath()
-                .resolve("journeymap").resolve("ore_heatmap_cache");
-        try {
-            Files.createDirectories(cacheDir);
-        } catch (IOException e) {
-            OreHeatmapMod.LOGGER.error("Failed to create cache directory", e);
+        if (cacheDirectory == null || currentWorldId == null) {
+            return null;
         }
-        return cacheDir.resolve(currentWorldId + ".json");
+        return cacheDirectory.resolve(currentWorldId + ".json");
     }
 
     /**
      * Load cached ore data from disk.
      */
     private void loadCacheFromDisk() {
-        if (currentWorldId == null) {
+        cacheLoadFailed = false;
+
+        Path cacheFile = getCacheFilePath();
+        if (cacheFile == null) {
+            OreHeatmapMod.LOGGER.debug("Cache file path unavailable");
             return;
         }
 
-        Path cacheFile = getCacheFilePath();
         if (!Files.exists(cacheFile)) {
             OreHeatmapMod.LOGGER.debug("No cache file found for world: {}", currentWorldId);
             return;
@@ -151,20 +191,15 @@ public class OreHeatmapOverlayManager {
                 dimensionOreCounts.putAll(loaded);
 
                 // Recalculate maxOreCount from loaded data
-                maxOreCount = 1;
-                for (Map<String, Integer> chunks : dimensionOreCounts.values()) {
-                    for (int count : chunks.values()) {
-                        if (count > maxOreCount) {
-                            maxOreCount = count;
-                        }
-                    }
-                }
+                recalculateMaxOreCount();
 
                 OreHeatmapMod.LOGGER.info("Loaded ore cache for world: {} ({} dimensions)",
                         currentWorldId, dimensionOreCounts.size());
             }
         } catch (Exception e) {
-            OreHeatmapMod.LOGGER.error("Failed to load ore cache", e);
+            OreHeatmapMod.LOGGER.error("Failed to load ore cache for world: {} - cache may be corrupted",
+                    currentWorldId, e);
+            cacheLoadFailed = true;
         }
     }
 
@@ -172,11 +207,16 @@ public class OreHeatmapOverlayManager {
      * Save ore data to disk.
      */
     private void saveCacheToDisk() {
-        if (currentWorldId == null || dimensionOreCounts.isEmpty()) {
+        if (dimensionOreCounts.isEmpty()) {
             return;
         }
 
         Path cacheFile = getCacheFilePath();
+        if (cacheFile == null) {
+            OreHeatmapMod.LOGGER.debug("Cannot save cache: file path unavailable");
+            return;
+        }
+
         try (Writer writer = Files.newBufferedWriter(cacheFile)) {
             GSON.toJson(dimensionOreCounts, writer);
             OreHeatmapMod.LOGGER.debug("Saved ore cache for world: {}", currentWorldId);
@@ -189,11 +229,52 @@ public class OreHeatmapOverlayManager {
     public void onPlayerLogout(ClientPlayerNetworkEvent.LoggingOut event) {
         // Save cache when leaving world
         saveCacheToDisk();
+        resetWorldState();
+    }
+
+    /**
+     * Reset all world-specific state. Called when leaving a world or switching worlds.
+     */
+    private void resetWorldState() {
         clearAllOverlays();
         dimensionOreCounts.clear();
-        maxOreCount = 1;
+        maxOreCount.set(1);
         currentWorldId = null;
         currentDimension = null;
+        cacheLoadFailed = false;
+    }
+
+    /**
+     * Check if the world has changed and handle the transition.
+     * Returns true if we're ready to process (world ID is valid), false otherwise.
+     */
+    private boolean ensureCorrectWorld() {
+        String newWorldId = getWorldId();
+        if (newWorldId == null) {
+            // Cannot determine world ID yet
+            return false;
+        }
+
+        if (currentWorldId == null) {
+            // First time initialization
+            currentWorldId = newWorldId;
+            loadCacheFromDisk();
+            OreHeatmapMod.LOGGER.info("Initialized ore heatmap for world: {}", currentWorldId);
+            return true;
+        }
+
+        if (!currentWorldId.equals(newWorldId)) {
+            // World has changed - save old data and switch
+            OreHeatmapMod.LOGGER.info("World changed from {} to {} - switching data", currentWorldId, newWorldId);
+            saveCacheToDisk();
+            resetWorldState();
+            currentWorldId = newWorldId;
+            loadCacheFromDisk();
+            return true;
+        }
+
+        // Same world, continue normally
+        return true;
     }
 
     /**
@@ -201,36 +282,37 @@ public class OreHeatmapOverlayManager {
      */
     @SubscribeEvent
     public void onChunkLoad(ChunkEvent.Load event) {
-        if (event.getLevel().isClientSide()) {
-            Level level = (Level) event.getLevel();
+        if (!event.getLevel().isClientSide()) {
+            return;
+        }
 
-            // Initialize world ID if not set (chunks can load before player tick)
-            if (currentWorldId == null) {
-                currentWorldId = getWorldId();
-                loadCacheFromDisk();
-                OreHeatmapMod.LOGGER.info("Initialized ore heatmap for world: {} (from chunk load)", currentWorldId);
-            }
+        if (!(event.getLevel() instanceof Level level)) {
+            return;
+        }
 
-            LevelChunk chunk = (LevelChunk) event.getChunk();
-            ChunkPos chunkPos = chunk.getPos();
+        // Verify we're in the correct world (handles world switches)
+        if (!ensureCorrectWorld()) {
+            return;
+        }
 
-            String dimKey = level.dimension().location().toString();
-            Map<String, Integer> oreCounts = dimensionOreCounts.computeIfAbsent(
-                    dimKey, k -> new ConcurrentHashMap<>()
-            );
+        LevelChunk chunk = (LevelChunk) event.getChunk();
+        ChunkPos chunkPos = chunk.getPos();
 
-            String chunkKey = chunkPos.x + "," + chunkPos.z;
+        String dimKey = level.dimension().location().toString();
+        Map<String, Integer> oreCounts = dimensionOreCounts.computeIfAbsent(
+                dimKey, k -> new ConcurrentHashMap<>()
+        );
 
-            // Only scan if not already scanned (persisted data)
-            if (!oreCounts.containsKey(chunkKey)) {
-                int count = scanChunk(level, chunkPos);
-                if (count >= 0) {
-                    oreCounts.put(chunkKey, count);
-                    if (count > maxOreCount) {
-                        maxOreCount = count;
-                    }
-                    OreHeatmapMod.LOGGER.debug("Scanned chunk {},{}: {} ores", chunkPos.x, chunkPos.z, count);
-                }
+        String chunkKey = chunkPos.x + "," + chunkPos.z;
+
+        // Only scan if not already scanned (persisted data)
+        if (!oreCounts.containsKey(chunkKey)) {
+            int count = scanChunk(level, chunkPos);
+            if (count >= 0) {
+                oreCounts.put(chunkKey, count);
+                // Thread-safe update of maxOreCount
+                maxOreCount.updateAndGet(current -> Math.max(current, count));
+                OreHeatmapMod.LOGGER.debug("Scanned chunk {},{}: {} ores", chunkPos.x, chunkPos.z, count);
             }
         }
     }
@@ -241,17 +323,19 @@ public class OreHeatmapOverlayManager {
             return;
         }
 
-        // Initialize world ID on first tick
-        if (currentWorldId == null) {
-            currentWorldId = getWorldId();
-            loadCacheFromDisk();
-            OreHeatmapMod.LOGGER.info("Initialized ore heatmap for world: {}", currentWorldId);
+        // Verify we're in the correct world (handles world switches)
+        if (!ensureCorrectWorld()) {
+            return;
+        }
+
+        // Notify user if cache was corrupted (only once per world load)
+        if (cacheLoadFailed) {
+            OreHeatmapMod.LOGGER.warn("Ore heatmap cache was corrupted for world: {} - starting fresh scan",
+                    currentWorldId);
+            cacheLoadFailed = false;  // Only warn once
         }
 
         Level level = player.level();
-        if (level == null) {
-            return;
-        }
 
         // Check for dimension change
         ResourceKey<Level> dimension = level.dimension();
@@ -269,7 +353,8 @@ public class OreHeatmapOverlayManager {
 
         // Periodic save
         saveCounter++;
-        if (saveCounter >= SAVE_INTERVAL / OreHeatmapConfig.UPDATE_INTERVAL_TICKS.get()) {
+        int saveTickInterval = Math.max(1, SAVE_INTERVAL / OreHeatmapConfig.UPDATE_INTERVAL_TICKS.get());
+        if (saveCounter >= saveTickInterval) {
             saveCounter = 0;
             saveCacheToDisk();
         }
@@ -283,7 +368,7 @@ public class OreHeatmapOverlayManager {
         if (isEnabled && oreCounts != null) {
             ChunkPos playerChunk = new ChunkPos(player.blockPosition());
             int radius = calculateVisibleRadius();
-            updateOverlays(dimension, oreCounts, playerChunk, radius);
+            updateOverlays(level, dimension, oreCounts, playerChunk, radius);
         } else if (wasEnabled) {
             // Only clear once when transitioning from enabled to disabled
             clearAllOverlays();
@@ -293,14 +378,15 @@ public class OreHeatmapOverlayManager {
     }
 
     private void recalculateMaxOreCount() {
-        maxOreCount = 1;
+        int max = 1;
         for (Map<String, Integer> chunks : dimensionOreCounts.values()) {
             for (int count : chunks.values()) {
-                if (count > maxOreCount) {
-                    maxOreCount = count;
+                if (count > max) {
+                    max = count;
                 }
             }
         }
+        maxOreCount.set(max);
     }
 
     private int calculateVisibleRadius() {
@@ -365,13 +451,30 @@ public class OreHeatmapOverlayManager {
         return false;
     }
 
-    private void updateOverlays(ResourceKey<Level> dimension, Map<String, Integer> oreCounts,
+    private void updateOverlays(Level level, ResourceKey<Level> dimension, Map<String, Integer> oreCounts,
                                  ChunkPos playerChunk, int radius) {
+        // Check cave display setting - skip if underground and setting is disabled
+        if (!OreHeatmapConfig.SHOW_OVERLAY_IN_CAVES.get()) {
+            try {
+                UIState fullscreenState = jmAPI.getUIState(Context.UI.Fullscreen);
+                if (fullscreenState != null && fullscreenState.dimension.equals(dimension)) {
+                    // Check if viewing underground/cave map (mapType indicates this)
+                    // For now, we allow all views since JourneyMap API doesn't expose mapType clearly
+                }
+            } catch (Exception e) {
+                OreHeatmapMod.LOGGER.debug("Could not check map state: {}", e.getMessage());
+            }
+        }
+
         float maxOpacity = (float) (double) OreHeatmapConfig.OVERLAY_OPACITY.get();
+        int currentMax = maxOreCount.get();
 
         Set<String> visibleKeys = new HashSet<>();
 
-        for (Map.Entry<String, Integer> entry : oreCounts.entrySet()) {
+        // Create snapshot to avoid ConcurrentModificationException during iteration
+        List<Map.Entry<String, Integer>> snapshot = new ArrayList<>(oreCounts.entrySet());
+
+        for (Map.Entry<String, Integer> entry : snapshot) {
             String chunkKey = entry.getKey();
             int totalOres = entry.getValue();
 
@@ -389,13 +492,24 @@ public class OreHeatmapOverlayManager {
                 continue;
             }
 
-            // Parse chunk position from key
+            // Parse chunk position from key with error handling
             String[] parts = chunkKey.split(",");
-            ChunkPos chunkPos = new ChunkPos(Integer.parseInt(parts[0]), Integer.parseInt(parts[1]));
+            if (parts.length != 2) {
+                OreHeatmapMod.LOGGER.warn("Invalid chunk key format: {}", chunkKey);
+                continue;
+            }
+
+            ChunkPos chunkPos;
+            try {
+                chunkPos = new ChunkPos(Integer.parseInt(parts[0]), Integer.parseInt(parts[1]));
+            } catch (NumberFormatException e) {
+                OreHeatmapMod.LOGGER.warn("Invalid chunk coordinates in key: {}", chunkKey);
+                continue;
+            }
 
             int color = calculateHeatmapColor(totalOres);
 
-            float densityFactor = Math.min(1.0f, totalOres / (float) Math.max(1, maxOreCount));
+            float densityFactor = Math.min(1.0f, totalOres / (float) Math.max(1, currentMax));
             float fillOpacity = 0.2f + (densityFactor * (maxOpacity - 0.2f));
 
             MapPolygon polygon = createChunkPolygon(chunkPos);
@@ -451,11 +565,12 @@ public class OreHeatmapOverlayManager {
     }
 
     private int calculateHeatmapColor(int oreCount) {
-        if (maxOreCount <= 1) {
+        int currentMax = maxOreCount.get();
+        if (currentMax <= 1) {
             return COLOR_MID;
         }
 
-        float t = oreCount / (float) maxOreCount;
+        float t = oreCount / (float) currentMax;
 
         if (t < 0.5f) {
             return interpolateColor(COLOR_LOW, COLOR_MID, t * 2);
@@ -489,10 +604,10 @@ public class OreHeatmapOverlayManager {
         int maxZ = chunkPos.getMaxBlockZ();
 
         return new MapPolygon(
-                new BlockPos(minX, 64, maxZ),
-                new BlockPos(maxX + 1, 64, maxZ),
-                new BlockPos(maxX + 1, 64, minZ),
-                new BlockPos(minX, 64, minZ)
+                new BlockPos(minX, POLYGON_Y_LEVEL, maxZ),
+                new BlockPos(maxX + 1, POLYGON_Y_LEVEL, maxZ),
+                new BlockPos(maxX + 1, POLYGON_Y_LEVEL, minZ),
+                new BlockPos(minX, POLYGON_Y_LEVEL, minZ)
         );
     }
 
