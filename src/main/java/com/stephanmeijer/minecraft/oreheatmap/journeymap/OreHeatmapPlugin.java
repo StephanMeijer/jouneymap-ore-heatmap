@@ -1,5 +1,7 @@
 package com.stephanmeijer.minecraft.oreheatmap.journeymap;
 
+import javax.annotation.ParametersAreNonnullByDefault;
+
 import com.stephanmeijer.minecraft.oreheatmap.OreHeatmapConfig;
 import com.stephanmeijer.minecraft.oreheatmap.OreHeatmapMod;
 import journeymap.api.v2.client.IClientAPI;
@@ -10,8 +12,6 @@ import journeymap.api.v2.client.fullscreen.ThemeButtonDisplay;
 import journeymap.api.v2.common.event.ClientEventRegistry;
 import net.minecraft.resources.ResourceLocation;
 import net.neoforged.neoforge.common.NeoForge;
-
-import javax.annotation.ParametersAreNonnullByDefault;
 
 /**
  * JourneyMap plugin for the Ore Heatmap mod.
@@ -24,14 +24,14 @@ public class OreHeatmapPlugin implements IClientPlugin {
     private IClientAPI jmAPI;
     private OreHeatmapOverlayManager overlayManager;
 
-    private static OreHeatmapPlugin INSTANCE;
+    private static OreHeatmapPlugin instance;
 
     public OreHeatmapPlugin() {
-        INSTANCE = this;
+        instance = this;
     }
 
     public static OreHeatmapPlugin getInstance() {
-        return INSTANCE;
+        return instance;
     }
 
     /**

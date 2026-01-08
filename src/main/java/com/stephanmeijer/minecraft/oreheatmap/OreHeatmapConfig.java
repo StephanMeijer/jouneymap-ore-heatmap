@@ -1,8 +1,8 @@
 package com.stephanmeijer.minecraft.oreheatmap;
 
-import net.neoforged.neoforge.common.ModConfigSpec;
-
 import java.util.List;
+
+import net.neoforged.neoforge.common.ModConfigSpec;
 
 public class OreHeatmapConfig {
     private static final ModConfigSpec.Builder BUILDER = new ModConfigSpec.Builder();
@@ -20,7 +20,7 @@ public class OreHeatmapConfig {
 
     static {
         BUILDER.comment("JourneyMap Ore Heatmap Configuration")
-               .push("general");
+                .push("general");
 
         ENABLED = BUILDER
                 .comment("Enable the ore heatmap overlay")
@@ -45,7 +45,7 @@ public class OreHeatmapConfig {
         BUILDER.pop();
 
         BUILDER.comment("Ore tracking configuration")
-               .push("ores");
+                .push("ores");
 
         TRACKED_ORES = BUILDER
                 .comment("List of ores to track.",

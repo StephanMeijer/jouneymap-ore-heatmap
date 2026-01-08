@@ -1,5 +1,16 @@
 package com.stephanmeijer.minecraft.oreheatmap.journeymap;
 
+import java.io.IOException;
+import java.io.Reader;
+import java.io.Writer;
+import java.lang.reflect.Type;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.reflect.TypeToken;
@@ -29,15 +40,6 @@ import net.neoforged.neoforge.client.event.ClientPlayerNetworkEvent;
 import net.neoforged.neoforge.event.level.ChunkEvent;
 import net.neoforged.neoforge.event.tick.PlayerTickEvent;
 
-import java.io.*;
-import java.lang.reflect.Type;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.HashSet;
-import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-
 /**
  * Manages ore scanning and JourneyMap overlay rendering.
  * Uses event-based architecture: scans chunks when they load.
@@ -63,13 +65,13 @@ public class OreHeatmapOverlayManager {
     private static final int COLOR_MID = 0xFF8C00;   // Dark orange
     private static final int COLOR_HIGH = 0x8B0000;  // Dark red
 
-    private int tickCounter = 0;
-    private int saveCounter = 0;
+    private int tickCounter;
+    private int saveCounter;
     private static final int SAVE_INTERVAL = 600; // Save every 30 seconds (600 ticks)
 
-    private ResourceKey<Level> currentDimension = null;
-    private String currentWorldId = null;
-    private boolean wasEnabled = false;  // Track previous enabled state
+    private ResourceKey<Level> currentDimension;
+    private String currentWorldId;
+    private boolean wasEnabled;  // Track previous enabled state
 
     public OreHeatmapOverlayManager(IClientAPI jmAPI) {
         this.jmAPI = jmAPI;
@@ -131,7 +133,9 @@ public class OreHeatmapOverlayManager {
      * Load cached ore data from disk.
      */
     private void loadCacheFromDisk() {
-        if (currentWorldId == null) return;
+        if (currentWorldId == null) {
+            return;
+        }
 
         Path cacheFile = getCacheFilePath();
         if (!Files.exists(cacheFile)) {
@@ -168,7 +172,9 @@ public class OreHeatmapOverlayManager {
      * Save ore data to disk.
      */
     private void saveCacheToDisk() {
-        if (currentWorldId == null || dimensionOreCounts.isEmpty()) return;
+        if (currentWorldId == null || dimensionOreCounts.isEmpty()) {
+            return;
+        }
 
         Path cacheFile = getCacheFilePath();
         try (Writer writer = Files.newBufferedWriter(cacheFile)) {
@@ -458,8 +464,8 @@ public class OreHeatmapOverlayManager {
         }
     }
 
-    private int interpolateColor(int color1, int color2, float t) {
-        t = Math.max(0, Math.min(1, t));
+    private int interpolateColor(int color1, int color2, float ratio) {
+        float t = Math.max(0, Math.min(1, ratio));
 
         int r1 = (color1 >> 16) & 0xFF;
         int g1 = (color1 >> 8) & 0xFF;

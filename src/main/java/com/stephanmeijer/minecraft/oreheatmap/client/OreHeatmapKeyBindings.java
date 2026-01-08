@@ -10,10 +10,10 @@ import net.minecraft.network.chat.Component;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.neoforge.client.event.ClientTickEvent;
 import net.neoforged.neoforge.client.event.RegisterKeyMappingsEvent;
 import net.neoforged.neoforge.client.settings.KeyConflictContext;
 import net.neoforged.neoforge.common.NeoForge;
-import net.neoforged.neoforge.client.event.ClientTickEvent;
 import org.lwjgl.glfw.GLFW;
 
 /**
@@ -70,9 +70,9 @@ public class OreHeatmapKeyBindings {
                 // Show feedback message to player
                 Minecraft mc = Minecraft.getInstance();
                 if (mc.player != null) {
-                    String messageKey = newState
-                            ? "message." + OreHeatmapMod.MODID + ".overlay_enabled"
-                            : "message." + OreHeatmapMod.MODID + ".overlay_disabled";
+                    String messageKey = newState ?
+                            "message." + OreHeatmapMod.MODID + ".overlay_enabled" :
+                            "message." + OreHeatmapMod.MODID + ".overlay_disabled";
                     mc.player.displayClientMessage(Component.translatable(messageKey), true);
                 }
 

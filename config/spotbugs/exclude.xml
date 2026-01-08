@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FindBugsFilter>
+    <!--
+        SpotBugs exclusion filter for JourneyMap Ore Heatmap
+        Only exclude patterns that are genuinely false positives in Minecraft modding context.
+        Keep this list minimal - fix issues rather than suppressing them.
+    -->
+
+    <!-- Exclude generated code (data generators, mixins) -->
+    <Match>
+        <Source name="~.*Generated.*\.java"/>
+    </Match>
+
+    <!-- Minecraft/NeoForge patterns that are intentional -->
+    <Match>
+        <!-- Registry objects are intentionally compared by reference -->
+        <Bug pattern="ES_COMPARING_STRINGS_WITH_EQ"/>
+        <Class name="~.*Registry.*"/>
+    </Match>
+
+    <!-- Serialization patterns in Minecraft -->
+    <Match>
+        <Bug pattern="SE_BAD_FIELD"/>
+        <Class name="~.*Packet.*"/>
+    </Match>
+
+    <!-- NeoForge config classes use public fields by design -->
+    <Match>
+        <Bug pattern="PA_PUBLIC_PRIMITIVE_ATTRIBUTE"/>
+        <Class name="~.*Config"/>
+    </Match>
+
+    <!-- KeyBindings public field is required for NeoForge registration -->
+    <Match>
+        <Bug pattern="PA_PUBLIC_PRIMITIVE_ATTRIBUTE"/>
+        <Class name="~.*KeyBindings"/>
+    </Match>
+    <Match>
+        <Bug pattern="MS_SHOULD_BE_FINAL"/>
+        <Class name="~.*KeyBindings"/>
+    </Match>
+    <Match>
+        <Bug pattern="MS_PKGPROTECT"/>
+        <Class name="~.*KeyBindings"/>
+    </Match>
+
+    <!-- JourneyMap plugin singleton pattern -->
+    <Match>
+        <Bug pattern="ST_WRITE_TO_STATIC_FROM_INSTANCE_METHOD"/>
+        <Class name="~.*OreHeatmapPlugin"/>
+    </Match>
+
+    <!--
+        EI_EXPOSE_REP / EI_EXPOSE_REP2: Exposing internal representation
+
+        FALSE POSITIVES in Minecraft modding context:
+        - JourneyMap API objects are not our data, they're API references
+        - Overlay manager state is intentionally shared
+    -->
+
+    <!-- JourneyMap API integration - storing/returning API references is required -->
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+        <Class name="~.*OreHeatmapPlugin"/>
+    </Match>
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+        <Class name="~.*OreHeatmapOverlayManager"/>
+    </Match>
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP"/>
+        <Class name="~.*OreHeatmapPlugin"/>
+    </Match>
+
+    <!-- NeoForge Level is annotated @Nonnull in event context -->
+    <Match>
+        <Bug pattern="RCN_REDUNDANT_NULLCHECK_OF_NONNULL_VALUE"/>
+        <Class name="~.*OreHeatmapOverlayManager"/>
+    </Match>
+</FindBugsFilter>

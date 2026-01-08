@@ -3,13 +3,20 @@ plugins {
     id 'maven-publish'
     id 'idea'
     id 'net.neoforged.moddev' version '2.0.137'
+    id 'com.diffplug.spotless' version '7.0.2'
+    id 'com.github.spotbugs' version '6.1.6'
+    id 'checkstyle'
+    id 'net.ltgt.errorprone' version '4.1.0'
 }
 
+// Load version from version.txt (managed by release-please)
+def mod_version = file('version.txt').text.trim()
 version = mod_version
 group = mod_group_id
 
 repositories {
     mavenLocal()
+    mavenCentral()
     maven {
         name = "JourneyMap (Public)"
         url = "https://jm.gserv.me/repository/maven-public/"
@@ -36,6 +43,201 @@ base {
 }
 
 java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+// Enable warnings and Error Prone
+// Note: -Werror disabled because JourneyMap API uses deprecated methods
+tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs << '-Xlint:all,-processing,-serial,-removal,-deprecation'
+    options.deprecation = false
+
+    // Error Prone configuration
+    options.errorprone {
+        disableWarningsInGeneratedCode = true
+        allErrorsAsWarnings = false
+
+        // Promote useful checks to errors
+        error('MissingOverride')
+        error('EqualsHashCode')
+        error('ReferenceEquality')
+        error('EmptyCatch')
+        error('Finally')
+        error('FutureReturnValueIgnored')
+        error('MissingCasesInEnumSwitch')
+        error('StringCaseLocaleUsage')
+        error('EnumOrdinal')
+
+        // Additional strict checks
+        error('DefaultCharset')
+        error('UnnecessaryParentheses')
+        error('BadImport')
+        error('DeadException')
+        error('LockNotBeforeTry')
+        error('OperatorPrecedence')
+        error('ProtectedMembersInFinalClass')
+        error('StaticAssignmentInConstructor')
+        error('UnusedNestedClass')
+
+        // Disabled - may have false positives in modding context
+        disable('ConstantField')      // Singleton INSTANCE patterns
+        disable('UnusedVariable')     // Parameters kept for API compatibility
+        disable('UnusedMethod')       // Methods called via reflection/events
+    }
+}
+
+// Disable Error Prone for test compilation (optional, can be noisy)
+tasks.named('compileTestJava') {
+    options.errorprone.enabled = false
+}
+
+// Unit tests with JUnit 5
+// Note: Tests requiring Minecraft classes use GameTests (runGameTestServer)
+// Pure logic tests can run via ./gradlew test
+tasks.named('test') {
+    useJUnitPlatform()
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+    }
+}
+
+// Add NeoForge/Minecraft classes to test classpath for unit tests
+sourceSets {
+    test {
+        compileClasspath += sourceSets.main.compileClasspath
+        runtimeClasspath += sourceSets.main.runtimeClasspath
+    }
+}
+
+// Code formatting with Spotless
+spotless {
+    java {
+        target 'src/*/java/**/*.java'
+
+        // Remove unused imports
+        removeUnusedImports()
+
+        // Import ordering: java, javax, then others alphabetically
+        importOrder('java', 'javax', '', '\\#')
+
+        // Trim trailing whitespace
+        trimTrailingWhitespace()
+
+        // Ensure files end with newline
+        endWithNewline()
+
+        // Indentation: 4 spaces (convert tabs to spaces)
+        leadingTabsToSpaces(4)
+    }
+
+    format 'misc', {
+        target '*.gradle', '*.md', '.gitignore'
+        trimTrailingWhitespace()
+        endWithNewline()
+    }
+}
+
+// SpotBugs static analysis
+spotbugs {
+    ignoreFailures = false
+    showStackTraces = true
+    showProgress = true
+    excludeFilter = file('config/spotbugs/exclude.xml')
+    reportsDir = file("$buildDir/reports/spotbugs")
+}
+
+tasks.withType(com.github.spotbugs.snom.SpotBugsTask).configureEach {
+    reports {
+        html.required = true
+        xml.required = false
+    }
+}
+
+// Checkstyle code style enforcement
+checkstyle {
+    toolVersion = '10.21.4'
+    configFile = file('config/checkstyle/checkstyle.xml')
+    maxWarnings = 0
+    maxErrors = 0
+}
+
+tasks.withType(Checkstyle).configureEach {
+    reports {
+        xml.required = false
+        html.required = true
+    }
+}
+
+// Data generator verification task
+tasks.register('verifyDataGen') {
+    description = 'Verifies that generated data files are up-to-date'
+    group = 'verification'
+
+    dependsOn runData
+
+    doLast {
+        def generatedDir = file('src/generated/resources')
+
+        // Check that generated directory exists
+        if (!generatedDir.exists()) {
+            throw new GradleException("Generated resources directory does not exist. Run 'runData' first.")
+        }
+
+        // Verify JSON files are valid
+        def jsonFiles = fileTree(generatedDir).matching { include '**/*.json' }
+        def jsonSlurper = new groovy.json.JsonSlurper()
+        jsonFiles.each { f ->
+            try {
+                jsonSlurper.parse(f)
+            } catch (Exception e) {
+                throw new GradleException("Invalid JSON in ${f.path}: ${e.message}")
+            }
+        }
+
+        logger.lifecycle("Data generation verification passed: ${jsonFiles.files.size()} JSON files validated")
+    }
+}
+
+// Validate JSON resources in main resources
+tasks.register('validateResources') {
+    description = 'Validates JSON resources are well-formed'
+    group = 'verification'
+
+    // Capture file references at configuration time for configuration cache compatibility
+    def assetsDir = layout.projectDirectory.dir('src/main/resources/assets')
+    def dataDir = layout.projectDirectory.dir('src/main/resources/data')
+
+    doLast {
+        def resourceDirs = [assetsDir.asFile, dataDir.asFile]
+        def jsonSlurper = new groovy.json.JsonSlurper()
+        def count = 0
+
+        resourceDirs.each { dir ->
+            if (dir.exists()) {
+                dir.eachFileRecurse(groovy.io.FileType.FILES) { f ->
+                    if (f.name.endsWith('.json')) {
+                        try {
+                            jsonSlurper.parse(f)
+                            count++
+                        } catch (Exception e) {
+                            throw new GradleException("Invalid JSON in ${f.path}: ${e.message}")
+                        }
+                    }
+                }
+            }
+        }
+
+        logger.lifecycle("Resource validation passed: ${count} JSON files validated")
+    }
+}
+
+// Add validation to check task
+check.dependsOn validateResources
+
+// Composite task for all static analysis
+tasks.register('staticAnalysis') {
+    description = 'Runs all static analysis tools'
+    group = 'verification'
+    dependsOn 'spotbugsMain', 'checkstyleMain', 'validateResources'
+}
 
 neoForge {
     // Specify the version of NeoForge to use.
@@ -113,8 +315,15 @@ neoForge {
 // Include resources generated by data generators.
 sourceSets.main.resources { srcDir 'src/generated/resources' }
 
-
 dependencies {
+    // Error Prone static analysis (compile-time)
+    errorprone 'com.google.errorprone:error_prone_core:2.36.0'
+
+    // Testing
+    testImplementation platform('org.junit:junit-bom:5.11.4')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+
     // JourneyMap API - compile time only (soft dependency)
     compileOnly(group: 'info.journeymap', name: 'journeymap-api-neoforge', version: project.journeymap_api_version, changing: true)
 
@@ -125,17 +334,19 @@ dependencies {
 // This block of code expands all declared replace properties in the specified resource targets.
 // A missing property will result in an error. Properties are expanded using ${} Groovy notation.
 var generateModMetadata = tasks.register("generateModMetadata", ProcessResources) {
-    var replaceProperties = [minecraft_version      : minecraft_version,
-                             minecraft_version_range: minecraft_version_range,
-                             neo_version            : neo_version,
-                             neo_version_range      : neo_version_range,
-                             loader_version_range   : loader_version_range,
-                             mod_id                 : mod_id,
-                             mod_name               : mod_name,
-                             mod_license            : mod_license,
-                             mod_version            : mod_version,
-                             mod_authors            : mod_authors,
-                             mod_description        : mod_description]
+    var replaceProperties = [
+            minecraft_version      : minecraft_version,
+            minecraft_version_range: minecraft_version_range,
+            neo_version            : neo_version,
+            neo_version_range      : neo_version_range,
+            loader_version_range   : loader_version_range,
+            mod_id                 : mod_id,
+            mod_name               : mod_name,
+            mod_license            : mod_license,
+            mod_version            : mod_version,
+            mod_authors            : mod_authors,
+            mod_description        : mod_description
+    ]
     inputs.properties replaceProperties
     expand replaceProperties
     from "src/main/templates"

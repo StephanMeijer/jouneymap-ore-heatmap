@@ -1,0 +1,34 @@
+# Lefthook configuration
+# https://github.com/evilmartians/lefthook
+#
+# This configuration is LOCAL TO THIS REPOSITORY ONLY.
+# Hooks are installed in .git/hooks/ and only affect this repo.
+#
+# To install hooks: lefthook install
+# To uninstall: lefthook uninstall
+#
+# For personal customizations not shared with the team,
+# create lefthook-local.yml and add it to .gitignore
+
+pre-commit:
+  parallel: true
+  commands:
+    spotless-apply:
+      run: ./gradlew spotlessApply --quiet
+      stage_fixed: true
+    test:
+      run: ./gradlew test --quiet
+    lint:
+      run: ./gradlew checkstyleMain checkstyleTest --quiet
+    spotbugs:
+      run: ./gradlew spotbugsMain spotbugsTest --quiet
+    build:
+      run: ./gradlew classes testClasses --quiet
+
+pre-push:
+  parallel: true
+  commands:
+    spotless-check:
+      run: ./gradlew spotlessCheck --quiet
+    full-build:
+      run: ./gradlew build --quiet
